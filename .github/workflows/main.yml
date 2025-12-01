@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.0.6)'
+        required: true
+        type: string
+
+jobs:
+  create-version-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version
+        id: extract_version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            TAG_NAME="v$VERSION"
+          else
+            TAG_NAME=${GITHUB_REF#refs/tags/}
+            VERSION=${TAG_NAME#v}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+
+      - name: Update project.ini version
+        run: |
+          sed -i "s/^version = .*/version = ${{ steps.extract_version.outputs.version }}/" project.ini
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "bump version to ${{ steps.extract_version.outputs.version }}"
+          branch: release/${{ steps.extract_version.outputs.tag_name }}
+          delete-branch: true
+          title: "Release ${{ steps.extract_version.outputs.tag_name }}"
+          body: |
+            This PR updates the version in `project.ini` to `${{ steps.extract_version.outputs.version }}`.
+            
+            Triggered by tag: `${{ steps.extract_version.outputs.tag_name }}`
+            
+            Once approved and merged, a release will be created automatically.
+          labels: release
+
+  create-release:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if this is a version bump commit
+        id: check_commit
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          if [[ "$COMMIT_MSG" == *"bump version to "* ]]; then
+            VERSION=$(echo "$COMMIT_MSG" | sed 's/chore: bump version to //')
+            echo "is_version_bump=true" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "tag_name=v$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "is_version_bump=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create release
+        if: steps.check_commit.outputs.is_version_bump == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.check_commit.outputs.tag_name }}" \
+              --repo="${{ github.repository }}" \
+              --title="Release ${{ steps.check_commit.outputs.tag_name }}" \
+              --generate-notes
